@@ -80,8 +80,12 @@ def test_build_report_markdown_has_required_sections(pipeline_result):
         "## 3. 显著因子识别",
         "## 4. 统计检验",
         "## 5. 预测模型对比",
-        "## 6. 图表",
-        "## 7. 可复现性与边界",
+        "## 6. 聚类：把「不合格」拆成几种失效模式",
+        "## 7. 回归：预测连续的性能指标",
+        "## 8. 神经网络（MLPClassifier）与树模型的对比",
+        "## 9. 时间序列 / 趋势分析",
+        "## 10. 图表",
+        "## 11. 可复现性与边界",
     ):
         assert section in markdown, f"报告缺少章节 {section}"
     # 必须写明这是合成数据
@@ -151,7 +155,11 @@ def test_csv_artifacts_have_expected_columns(pipeline_result):
 
     comparison = pd.read_csv(pipeline_result["paths"]["model_comparison"], encoding="utf-8")
     assert {"model", "ap", "roc_auc", "f1"}.issubset(comparison.columns)
-    assert len(comparison) == 3
+    assert len(comparison) == 4  # 逻辑回归 / 随机森林 / 梯度提升 / 神经网络
+
+    cluster_profile = pd.read_csv(pipeline_result["paths"]["cluster_profile"], encoding="utf-8")
+    assert {"cluster", "n", "share"}.issubset(cluster_profile.columns)
+    assert len(cluster_profile) == pipeline_result["metrics"]["clustering"]["k_selected"]
 
     tests = pd.read_csv(pipeline_result["paths"]["significance_tests"], encoding="utf-8")
     assert {"level", "factor", "method", "p_value", "q_value"}.issubset(tests.columns)

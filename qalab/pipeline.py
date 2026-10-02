@@ -14,13 +14,16 @@ import numpy as np
 import pandas as pd
 
 from . import config as cfg
+from . import cluster as qcluster
 from . import io as qio
 from . import model as qmodel
 from . import plots as qplots
 from . import quality as qquality
+from . import regression as qregression
 from . import report as qreport
 from . import significance as qsig
 from . import synth
+from . import timeseries as qtimeseries
 
 
 def ensure_raw_data(
@@ -164,8 +167,27 @@ def run_pipeline(
     t0 = time.perf_counter()
     modeling, extras = qmodel.run_modeling(clean, seed=seed)
     timings["modeling"] = time.perf_counter() - t0
-    log(f"[6/8] 建模: 主模型 {modeling['best_model_by_validation_ap']}, "
-        f"测试集 AP={modeling['models'][modeling['best_model_by_validation_ap']]['test_metrics']['average_precision']:.4f}")
+    log(f"[6/12] 建模: 主模型 {modeling['best_model_by_validation_ap']}, "
+        f"测试集 AP={modeling['models'][modeling['best_model_by_validation_ap']]['test_metrics']['average_precision']:.4f}, "
+        f"共 {len(modeling['models'])} 个模型（含神经网络）")
+
+    t0 = time.perf_counter()
+    clustering, cluster_extras = qcluster.run_clustering(clean, seed=seed)
+    timings["clustering"] = time.perf_counter() - t0
+    log(f"[7/12] 聚类: 不合格样本 {clustering['n_samples']} 个 -> k={clustering['k_selected']}, "
+        f"轮廓系数={clustering['silhouette']}, 簇规模={clustering['cluster_sizes']}")
+
+    t0 = time.perf_counter()
+    regression, regression_extras = qregression.run_regression(clean, seed=seed)
+    timings["regression"] = time.perf_counter() - t0
+    log(f"[8/12] 回归: 主目标 {regression['primary_target']} -> {regression.get('note', '')}")
+
+    t0 = time.perf_counter()
+    timeseries_result, timeseries_extras = qtimeseries.run_timeseries(
+        clean, value_cols=(cfg.PERF_NUMERIC[0], cfg.PERF_NUMERIC[1])
+    )
+    timings["timeseries"] = time.perf_counter() - t0
+    log(f"[9/12] 时间序列: {timeseries_result.get('trend_summary', {})}")
 
     t0 = time.perf_counter()
     plot_paths: list[Path] = []
@@ -179,9 +201,14 @@ def run_pipeline(
             modeling,
             extras,
             out_dir,
+            extra_analyses={
+                "clustering": (clustering, cluster_extras),
+                "regression": (regression, regression_extras),
+                "timeseries": (timeseries_result, timeseries_extras),
+            },
         )
     timings["plots"] = time.perf_counter() - t0
-    log(f"[7/8] 图表: {len(plot_paths)} 张")
+    log(f"[10/12] 图表: {len(plot_paths)} 张")
 
     # ---------------- 组装 metrics（可复算：无耗时/时间戳） ----------------
     naive_sig = ranking.loc[ranking["unit_naive_significant"], "factor"].tolist()
@@ -244,11 +271,17 @@ def run_pipeline(
             "top_factor_detail": _top_factor_detail(tests, ranking),
         },
         "modeling": modeling,
+        "clustering": clustering,
+        "regression": regression,
+        "timeseries": timeseries_result,
     }
 
     t0 = time.perf_counter()
     metrics_path = qreport.write_json(metrics, out_dir / "metrics.json")
     ranking_path = qreport.write_csv(ranking, out_dir / "factor_ranking.csv")
+    cluster_profile_path = qreport.write_csv(
+        cluster_extras.get("profile", pd.DataFrame()), out_dir / "cluster_profile.csv"
+    )
     comparison = pd.DataFrame(
         [
             {
@@ -281,9 +314,9 @@ def run_pipeline(
         seed,
         extra={"data_source": "本次运行重新生成并落盘" if generated else "从磁盘读取已有文件"},
     )
-    log(f"[8/8] 产物: {metrics_path.name}, {report_path.name}, "
-        f"{ranking_path.name}, {comparison_path.name}, {tests_path.name}, {meta_path.name}, "
-        f"{len(plot_paths)} 张图")
+    log(f"[11/12] 产物: {metrics_path.name}, {report_path.name}, "
+        f"{ranking_path.name}, {comparison_path.name}, {tests_path.name}, "
+        f"{cluster_profile_path.name}, {meta_path.name}, {len(plot_paths)} 张图")
 
     return {
         "metrics": metrics,
@@ -304,7 +337,14 @@ def run_pipeline(
             "factor_ranking": ranking_path,
             "model_comparison": comparison_path,
             "significance_tests": tests_path,
+            "cluster_profile": cluster_profile_path,
             "run_meta": meta_path,
         },
+        "clustering": clustering,
+        "cluster_extras": cluster_extras,
+        "regression": regression,
+        "regression_extras": regression_extras,
+        "timeseries": timeseries_result,
+        "timeseries_extras": timeseries_extras,
         "timings": timings,
     }

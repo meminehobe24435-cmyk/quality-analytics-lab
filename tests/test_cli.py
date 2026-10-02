@@ -80,7 +80,7 @@ def test_run_pipeline_writes_all_expected_artifacts(pipeline_result):
     assert expected.issubset(existing)
 
     pngs = sorted(p.name for p in out_dir.glob("*.png"))
-    assert len(pngs) >= 9, f"至少应有 9 张图，实际 {pngs}"
+    assert len(pngs) >= 15, f"至少应有 15 张图，实际 {pngs}"
     for name in (
         "01_label_balance.png",
         "02_numeric_distributions_by_label.png",
@@ -91,6 +91,13 @@ def test_run_pipeline_writes_all_expected_artifacts(pipeline_result):
         "07_roc_pr_curves.png",
         "08_data_quality.png",
         "09_model_comparison.png",
+        # 五类算法的补充图：聚类 / 回归 / 时间序列
+        "10_cluster_selection.png",
+        "11_cluster_profiles.png",
+        "12_cluster_defect_composition.png",
+        "13_cluster_pca_scatter.png",
+        "14_regression_predicted_vs_actual.png",
+        "15_timeseries_trend.png",
     ):
         assert name in pngs
     # 图不能是空文件
@@ -112,6 +119,38 @@ def test_run_pipeline_metrics_content(pipeline_result):
     assert metrics["quality"]["duplicates"]["n_full_duplicate_rows"] == cfg.N_INJECTED_DUPLICATE_ROWS
     assert metrics["cleaning"]["actions"]["rows_before"] == metrics["data"]["n_wide_rows"]
     assert len(metrics["data"]["clean_fingerprint"]) == 64
+
+
+def test_pipeline_metrics_cover_all_five_algorithm_families(pipeline_result):
+    """五类算法都要在指标文件里有真实产物：分类 / 聚类 / 回归 / 神经网络 / 时间序列。"""
+    metrics = pipeline_result["metrics"]
+
+    # 分类（含神经网络）
+    assert metrics["modeling"]["models"]["mlp_classifier"]["test_metrics"]["average_precision"] > 0
+    assert len(metrics["modeling"]["models"]) == 4
+
+    # 聚类
+    clustering = metrics["clustering"]
+    assert clustering["k_selected"] is not None
+    assert clustering["silhouette"] > 0
+    assert sum(clustering["cluster_sizes"].values()) == clustering["n_samples"]
+    assert len(clustering["profile"]) == clustering["k_selected"]
+    assert clustering["defect_composition"]
+
+    # 回归
+    regression = metrics["regression"]
+    assert regression["primary"]["models"]
+    for entry in regression["primary"]["models"].values():
+        assert entry["test"]["mae"] > 0
+        assert entry["test"]["rmse"] > 0
+    assert regression["baseline_mae"] > 0
+
+    # 时间序列
+    timeseries = metrics["timeseries"]
+    assert timeseries["n_batches"] == cfg.N_BATCHES
+    assert timeseries["series"]["batch_fail_rate"]["mann_kendall"]["p_value"] is not None
+    assert timeseries["next_batch_forecast"]["exponential_smoothing"] is not None
+    assert set(timeseries["forecast_one_step_error"]) == {"ses", "ar1", "mean", "last"}
 
 
 def test_pipeline_progress_log_is_emitted(tmp_path):

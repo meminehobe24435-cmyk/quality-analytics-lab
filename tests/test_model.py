@@ -13,6 +13,7 @@ import pytest
 
 from qalab import config as cfg
 from qalab import model as m
+from sklearn.linear_model import LogisticRegression
 
 
 # --------------------------------------------------------------------------
@@ -228,12 +229,90 @@ def test_leaky_feature_would_be_perfectly_predictive(clean_wide):
 # --------------------------------------------------------------------------
 # 模型与交叉验证
 # --------------------------------------------------------------------------
-def test_build_models_contains_three_models_with_class_weight():
+def test_build_models_contains_four_models_with_imbalance_handling():
+    """四个模型都要处理类别不平衡：三个用 class_weight，神经网络用随机过采样。"""
     models = m.build_models(cfg.SEED)
-    assert set(models) == {"logistic_regression", "random_forest", "hist_gradient_boosting"}
-    for name, pipe in models.items():
-        clf = pipe.named_steps["clf"]
+    assert set(models) == {
+        "logistic_regression",
+        "random_forest",
+        "hist_gradient_boosting",
+        "mlp_classifier",
+    }
+    for name in ("logistic_regression", "random_forest", "hist_gradient_boosting"):
+        clf = models[name].named_steps["clf"]
         assert getattr(clf, "class_weight", None) is not None, f"{name} 未处理类别不平衡"
+    # MLPClassifier 在 sklearn 里没有 class_weight，必须用重采样包装
+    mlp_step = models["mlp_classifier"].named_steps["clf"]
+    assert isinstance(mlp_step, m.OversampledClassifier)
+    assert not hasattr(mlp_step.base, "class_weight")
+
+
+def test_oversampled_classifier_balances_training_data():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"a": rng.normal(size=300), "b": rng.normal(size=300)})
+    y = pd.Series([0] * 270 + [1] * 30)
+    clf = m.OversampledClassifier(
+        base=LogisticRegression(max_iter=200), random_state=cfg.SEED
+    )
+    clf.fit(X, y)
+    assert clf.n_train_original_ == 300
+    assert clf.n_train_resampled_ == 540  # 两类各 270
+    assert clf.n_oversampled_added_ == 240
+    # 预测阶段不做采样，输出行数与输入一致
+    proba = clf.predict_proba(X)
+    assert proba.shape == (300, 2)
+    assert np.allclose(proba.sum(axis=1), 1.0)
+
+
+def test_oversampled_classifier_is_deterministic_and_leak_free():
+    """过采样只发生在 fit 内部，且同一随机种子结果一致。"""
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame({"a": rng.normal(size=200)})
+    y = pd.Series([0] * 180 + [1] * 20)
+    a = m.OversampledClassifier(base=LogisticRegression(), random_state=7).fit(X, y)
+    b = m.OversampledClassifier(base=LogisticRegression(), random_state=7).fit(X, y)
+    assert a.n_train_resampled_ == b.n_train_resampled_
+    proba_a = a.predict_proba(X)
+    proba_b = b.predict_proba(X)
+    assert np.allclose(proba_a, proba_b)
+
+
+def test_oversampled_classifier_single_class_does_not_crash():
+    """退化输入：训练标签只有单一类别时退化为常数预测器（多数基学习器会直接报错）。"""
+    X = pd.DataFrame({"a": [0.1, 0.2, 0.3, 0.4]})
+    y = pd.Series([1, 1, 1, 1])
+    clf = m.OversampledClassifier(base=LogisticRegression(), random_state=0).fit(X, y)
+    assert clf.n_oversampled_added_ == 0
+    assert clf.n_train_resampled_ == 4
+    assert clf.single_class_ is True
+    proba = clf.predict_proba(X)
+    assert proba.shape == (4, 2), "接口必须保持 2 列，与其它模型一致"
+    assert np.allclose(proba[:, 1], 1.0)
+    assert (clf.predict(X) == 1).all()
+
+    # 全 0 的标签同样要能处理
+    clf0 = m.OversampledClassifier(base=LogisticRegression(), random_state=0).fit(
+        X, pd.Series([0, 0, 0, 0])
+    )
+    assert np.allclose(clf0.predict_proba(X)[:, 0], 1.0)
+    assert (clf0.predict(X) == 0).all()
+
+
+def test_oversampled_classifier_works_in_cross_validation():
+    """必须能在交叉验证里跑通：若标签识别（is_classifier）失效，roc_auc 会报形状错误。"""
+    from sklearn.base import is_classifier
+
+    df = _toy_frame(n=300, seed=3)
+    X, numeric, categorical = m.prepare_features(df)
+    y = df[cfg.LABEL_COL]
+    from sklearn.model_selection import StratifiedKFold, cross_validate
+
+    model = m.build_pipeline("mlp_classifier", numeric, categorical)
+    assert is_classifier(model) is True
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=cfg.SEED)
+    scores = cross_validate(model, X, y, cv=cv, scoring={"roc_auc": "roc_auc"}, n_jobs=1)
+    assert len(scores["test_roc_auc"]) == 3
+    assert all(0.0 <= s <= 1.0 for s in scores["test_roc_auc"])
 
 
 def test_build_pipeline_unknown_model_raises():
@@ -325,6 +404,7 @@ def test_run_modeling_returns_expected_structure(modeling):
         "logistic_regression",
         "random_forest",
         "hist_gradient_boosting",
+        "mlp_classifier",
     }
     assert result["best_model_by_validation_ap"] in result["models"]
     for col in cfg.LEAKY_COLUMNS:

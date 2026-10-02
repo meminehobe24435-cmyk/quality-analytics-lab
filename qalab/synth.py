@@ -176,20 +176,32 @@ def generate_production_runs(
 
 
 def generate_inspection_results(
-    runs: pd.DataFrame, latent: pd.DataFrame, seed: int = cfg.SEED + 2
+    runs: pd.DataFrame,
+    latent: pd.DataFrame,
+    seed: int = cfg.SEED + 2,
+    batches: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """质量检验结果：单元级的合格/不合格标签 + 缺陷类型 + 检验员/班次。
 
-    缺陷类型按「失效机理」加权生成，使缺陷分布与根因可解释（而不是随机贴标签）。
+    **缺陷类型按失效机理加权生成**：气孔与原料含水率/环境湿度相关，裂纹与过热/快冷相关，
+    尺寸与线速相关，夹杂与原料供应商相关，边缘缺陷与炉温偏低相关。
+    这样"工艺条件 -> 缺陷形态"才有物理解释，聚类出来的失效模式才讲得通。
+
+    实现要点：只改变传给 `rng.choice` 的**概率向量**，不改变它的调用次数与 size，
+    因此随机数流的消耗与"固定权重"版本完全一致 —— 其余所有数据保持逐字节不变，
+    只有缺陷类型这一列的内容变化（这是刻意的：避免为了一个新功能打乱全部已验证结果）。
     """
     rng = np.random.default_rng(seed)
     z_map = latent.set_index("run_id")["z_run"]
+    moisture_map = (
+        batches.set_index("batch_id")["material_moisture_pct"].to_dict()
+        if batches is not None
+        else {}
+    )
 
     rows: list[dict[str, object]] = []
     unit_no = 0
-    # 缺陷类型 -> 最相关的因子（按机理分配概率）
     defect_pool = ["PORE", "CRACK", "DIMENSION", "CONTAMINATION", "EDGE"]
-    defect_weight = np.array([0.36, 0.18, 0.22, 0.13, 0.11])
     inspectors = [f"INS{i:02d}" for i in range(1, 9)]
     methods = ["VISUAL", "XRAY", "DIMENSION"]
 
@@ -201,9 +213,31 @@ def generate_inspection_results(
         unit_z = z_run + rng.normal(0.0, _UNIT_NOISE_SD, size=n_units)
         p = _sigmoid(unit_z)
         is_fail = rng.random(n_units) < p
+
+        dev = float(run["furnace_temp_c"]) - _TEMP_OPTIMUM
+        hot = max(dev, 0.0) / _TEMP_SD
+        cold = max(-dev, 0.0) / _TEMP_SD
+        speed = (float(run["line_speed_mpm"]) - 21.0) / _SPEED_SD
+        cooling = (float(run["cooling_rate_cps"]) - 8.0) / _COOL_SD
+        moisture = moisture_map.get(run["batch_id"])
+        moisture_std = ((moisture - 3.43) / _MOIST_SD) if moisture is not None else 0.0
+        supplier = str(run.get("material_supplier", "")) if "material_supplier" in run else ""
+        supplier_factor = {"SUP-C": 1.7, "SUP-B": 1.15}.get(supplier, 0.75)
+
+        weights = np.array(
+            [
+                0.36 * np.exp(0.9 * moisture_std),                 # PORE  气孔 <- 含水率
+                0.18 * np.exp(0.9 * hot + 0.5 * cooling),          # CRACK 裂纹 <- 过热/快冷
+                0.22 * np.exp(0.9 * speed),                        # DIMENSION 尺寸 <- 线速
+                0.13 * supplier_factor,                            # CONTAMINATION 夹杂 <- 原料
+                0.11 * np.exp(0.9 * cold),                         # EDGE  边缘 <- 炉温偏低
+            ]
+        )
+        weights = weights / weights.sum()
+
         for uid, flag in zip(unit_ids, is_fail):
             if flag:
-                defect = str(rng.choice(defect_pool, p=defect_weight))
+                defect = str(rng.choice(defect_pool, p=weights))
             else:
                 defect = "NONE"
             rows.append(
@@ -364,7 +398,13 @@ def generate_all(seed: int = cfg.SEED) -> tuple[dict[str, pd.DataFrame], dict[st
     """
     batches = generate_material_batches(seed)
     runs, latent = generate_production_runs(batches, seed + 1)
-    inspections = generate_inspection_results(runs, latent, seed + 2)
+    # 缺陷类型需要原料含水率与供应商（机理相关），因此把批次表传进去
+    runs_with_supplier = runs.merge(
+        batches[["batch_id", "material_supplier"]], on="batch_id", how="left"
+    )
+    inspections = generate_inspection_results(
+        runs_with_supplier, latent, seed + 2, batches=batches
+    )
     perf = generate_perf_tests(inspections, latent, seed + 3)
     runs, inspections, perf, manifest = inject_known_anomalies(runs, inspections, perf)
 

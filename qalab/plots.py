@@ -43,6 +43,21 @@ def set_style() -> None:
     )
 
 
+# 图里的文字一律用英文：CI（Ubuntu runner）默认没有中文字体，
+# 中文标签会变成一堆方块。timeseries 模块返回的趋势判定是中文，
+# 直接塞进标题就会触发 "Glyph missing from font(s)" 并画出豆腐块 —— 实测踩过。
+TREND_LABEL_EN = {
+    "无显著趋势": "no significant trend",
+    "显著上升趋势": "significant upward trend",
+    "显著下降趋势": "significant downward trend",
+    "无法判定": "undetermined",
+}
+
+
+def _trend_en(label: object) -> str:
+    return TREND_LABEL_EN.get(str(label), str(label))
+
+
 def _save(fig, out_dir: Path, name: str) -> Path:
     path = Path(out_dir) / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +316,7 @@ def plot_data_quality(
 
 
 def plot_model_comparison(result: dict[str, object], out_dir: Path) -> Path:
-    """模型对比：测试集 AP / ROC-AUC / F1 + 交叉验证 AP（带误差棒）。"""
+    """模型对比：测试集 AP / ROC-AUC / F1（含神经网络基线）。"""
     models = result["models"]
     names = list(models)
     rows = []
@@ -336,17 +351,218 @@ def plot_model_comparison(result: dict[str, object], out_dir: Path) -> Path:
             }
         )
     long = pd.DataFrame(rows)
-    fig, ax = plt.subplots(figsize=(8.6, 4.2))
+    fig, ax = plt.subplots(figsize=(9.6, 4.4))
     sns.barplot(data=long, x="model", y="value", hue="metric", ax=ax)
     ax.set_ylim(0, 1.0)
     ax.set_title("Model comparison on the held-out test set (evaluated once)")
     ax.set_ylabel("score")
     ax.set_xlabel("")
     for container in ax.containers:
-        ax.bar_label(container, fmt="%.3f", fontsize=8, padding=2)
+        ax.bar_label(container, fmt="%.3f", fontsize=7, padding=2)
     ax.legend(title="metric", ncol=3, loc="lower right")
     plt.setp(ax.get_xticklabels(), rotation=12, ha="right")
     return _save(fig, out_dir, "09_model_comparison.png")
+
+
+# --------------------------------------------------------------------------
+# 聚类 / 回归 / 时间序列
+# --------------------------------------------------------------------------
+def plot_cluster_selection(silhouette_table: pd.DataFrame, out_dir: Path) -> Path:
+    """k 的选择：轮廓系数（越大越好）与 inertia（肘部）双面板。"""
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
+    table = silhouette_table.sort_values("k")
+    ax = axes[0]
+    sns.lineplot(data=table, x="k", y="silhouette", marker="o", ax=ax, color="#4C72B0")
+    best = table.loc[table["silhouette"].idxmax()]
+    ax.scatter([best["k"]], [best["silhouette"]], s=110, facecolor="none", edgecolor="#C44E52", zorder=5)
+    ax.annotate(
+        f"selected k={int(best['k'])}\nsilhouette={best['silhouette']:.3f}",
+        xy=(best["k"], best["silhouette"]),
+        xytext=(6, -18),
+        textcoords="offset points",
+        fontsize=8,
+        color="#C44E52",
+    )
+    ax.set_title("Silhouette score by k (higher is better)")
+    ax.set_xlabel("k (number of failure-mode clusters)")
+    ax.set_ylabel("silhouette")
+    if len(table) > 1:
+        ax.set_xticks(table["k"].astype(int))
+
+    ax = axes[1]
+    sns.lineplot(data=table, x="k", y="inertia", marker="s", ax=ax, color="darkorange")
+    ax.set_title("Within-cluster sum of squares (elbow)")
+    ax.set_xlabel("k")
+    ax.set_ylabel("inertia")
+    if len(table) > 1:
+        ax.set_xticks(table["k"].astype(int))
+    fig.suptitle("Failure-mode clustering: choosing k", y=1.02)
+    return _save(fig, out_dir, "10_cluster_selection.png")
+
+
+def plot_cluster_profiles(profile: pd.DataFrame, feature_cols: list[str], out_dir: Path) -> Path:
+    """簇画像热图：每个簇在每个特征上相对总体的偏离（z 值）。"""
+    z_cols = [f"z_{c}" for c in feature_cols if f"z_{c}" in profile.columns]
+    mat = profile.set_index("cluster")[z_cols].copy()
+    mat.columns = [c[2:] for c in mat.columns]
+    fig, ax = plt.subplots(figsize=(1.15 * len(mat.columns) + 3.2, 0.62 * len(mat) + 2.2))
+    sns.heatmap(
+        mat,
+        annot=True,
+        fmt=".2f",
+        cmap="vlag",
+        center=0,
+        linewidths=0.5,
+        cbar_kws={"label": "deviation from overall mean (z)", "shrink": 0.8},
+        annot_kws={"size": 8},
+        ax=ax,
+    )
+    sizes = profile.set_index("cluster")["n"].to_dict()
+    ax.set_yticklabels(
+        [f"cluster {int(c)} (n={sizes.get(c, '?')})" for c in mat.index], rotation=0
+    )
+    ax.set_title("Failure-mode profiles: deviation from overall mean (z-scored)")
+    plt.setp(ax.get_xticklabels(), rotation=35, ha="right")
+    return _save(fig, out_dir, "11_cluster_profiles.png")
+
+
+def plot_cluster_defect_composition(composition: pd.DataFrame, out_dir: Path) -> Path:
+    """每个簇的缺陷类型构成（堆叠柱）—— 簇画像与业务语言的接口。"""
+    if composition.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.text(0.5, 0.5, "no defect composition available", ha="center", va="center")
+        ax.set_axis_off()
+        return _save(fig, out_dir, "12_cluster_defect_composition.png")
+
+    long = (
+        composition.reset_index()
+        .melt(id_vars="cluster", var_name="defect_type", value_name="share")
+        .sort_values(["cluster", "defect_type"])
+    )
+    long["cluster_label"] = "cluster " + long["cluster"].astype(int).astype(str)
+    fig, ax = plt.subplots(figsize=(9.4, 4.4))
+    sns.barplot(
+        data=long,
+        x="cluster_label",
+        y="share",
+        hue="defect_type",
+        ax=ax,
+        palette="deep",
+    )
+    ax.set_title("Defect-type composition within each failure-mode cluster")
+    ax.set_xlabel("")
+    ax.set_ylabel("share of units in cluster")
+    ax.set_ylim(0, 1.0)
+    ax.legend(title="defect type", ncol=5, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12))
+    return _save(fig, out_dir, "12_cluster_defect_composition.png")
+
+
+def plot_cluster_scatter(pca: dict, labels, out_dir: Path) -> Path:
+    """把高维簇用 PCA 投影到二维看一眼（仅用于可视化，不参与任何统计结论）。"""
+    coords = np.asarray(pca["coords"])
+    evr = pca.get("explained_variance_ratio", [0, 0])
+    df = pd.DataFrame(
+        {"pc1": coords[:, 0], "pc2": coords[:, 1], "cluster": [f"cluster {c}" for c in labels]}
+    )
+    fig, ax = plt.subplots(figsize=(6.6, 4.8))
+    sns.scatterplot(data=df, x="pc1", y="pc2", hue="cluster", s=24, alpha=0.75, ax=ax)
+    ax.set_title(
+        f"Fail samples in PCA space (PC1 {evr[0]*100:.1f}% / PC2 {evr[1]*100:.1f}% variance)"
+    )
+    ax.legend(title="", fontsize=8, ncol=2)
+    return _save(fig, out_dir, "13_cluster_pca_scatter.png")
+
+
+def plot_regression_predicted_vs_actual(
+    y_test: np.ndarray,
+    predictions: dict[str, np.ndarray],
+    baseline: np.ndarray,
+    target: str,
+    metrics: dict[str, dict],
+    out_dir: Path,
+) -> Path:
+    """回归：预测值 vs 真值散点（含均值基线的水平线），每个模型一个面板。"""
+    names = list(predictions)
+    ncol = min(2, max(1, len(names)))
+    nrow = int(np.ceil(len(names) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 4.4 * nrow), squeeze=False)
+    axes = axes.ravel()
+    lo = float(min(y_test.min(), *(p.min() for p in predictions.values())))
+    hi = float(max(y_test.max(), *(p.max() for p in predictions.values())))
+    for ax, name in zip(axes, names):
+        pred = predictions[name]
+        sns.scatterplot(x=y_test, y=pred, s=14, alpha=0.45, ax=ax, color="#4C72B0", edgecolor="none")
+        ax.plot([lo, hi], [lo, hi], ls="--", lw=1, color="black", label="perfect prediction")
+        ax.axhline(float(np.mean(baseline)), ls=":", lw=1.2, color="#C44E52", label="mean baseline")
+        m = metrics.get(name, {})
+        ax.set_title(
+            f"{name}\nMAE={m.get('mae', float('nan')):.3f}  RMSE={m.get('rmse', float('nan')):.3f}  "
+            f"R2={m.get('r2', float('nan')):.3f}"
+        )
+        ax.set_xlabel(f"actual {target}")
+        ax.set_ylabel("predicted")
+        ax.legend(fontsize=7, loc="upper left")
+    for ax in axes[len(names) :]:
+        ax.axis("off")
+    fig.suptitle("Regression on a continuous quality metric (test set)", y=1.02)
+    return _save(fig, out_dir, "14_regression_predicted_vs_actual.png")
+
+
+def plot_timeseries_trend(
+    series: dict[str, object], backtest: dict[str, object], series_name: str, out_dir: Path
+) -> Path:
+    """时间序列：批次序列 + 移动平均 + 线性趋势（左），一步预测回测误差（右）。"""
+    values = pd.Series([np.nan if v is None else v for v in series.get("values", [])], dtype="float64")
+    ma = pd.Series(
+        [np.nan if v is None else v for v in series.get("moving_average", [])], dtype="float64"
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(11.4, 4.2))
+
+    ax = axes[0]
+    x = np.arange(len(values))
+    ax.plot(x, values, marker="o", ms=3.5, lw=1.2, color="#4C72B0", label="observed")
+    if ma.notna().any():
+        ax.plot(x, ma, lw=2.0, color="darkorange", label=f"moving average (w={series.get('window')})")
+    lt = series.get("linear_trend", {})
+    if lt.get("slope") is not None:
+        intercept = lt["intercept"]
+        ax.plot(
+            x,
+            intercept + lt["slope"] * x,
+            ls="--",
+            lw=1.4,
+            color="#C44E52",
+            label=f"linear trend (p={lt['p_value']:.3f})",
+        )
+    mk = series.get("mann_kendall", {})
+    ax.set_title(
+        f"{series_name}\nMann-Kendall: {_trend_en(mk.get('trend'))} "
+        f"(p={mk.get('p_value') if mk.get('p_value') is None else round(mk['p_value'], 3)})"
+    )
+    ax.set_xlabel("batch order (production sequence)")
+    ax.set_ylabel(series_name.replace("_", " "))
+    ax.legend(fontsize=8)
+
+    ax = axes[1]
+    predictors = backtest.get("predictors", {}) if backtest else {}
+    if predictors:
+        frame = pd.DataFrame(
+            [{"predictor": k, "MAE": v["mae"], "RMSE": v["rmse"]} for k, v in predictors.items()]
+        ).melt(id_vars="predictor", var_name="metric", value_name="error")
+        sns.barplot(data=frame, x="predictor", y="error", hue="metric", ax=ax)
+        for container in ax.containers:
+            ax.bar_label(container, fmt="%.3f", fontsize=8, padding=2)
+        ax.set_title("One-step-ahead forecast error (expanding-window backtest)")
+        ax.set_ylabel("error")
+        ax.set_xlabel("")
+        ax.legend(title="", fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "backtest unavailable", ha="center", va="center")
+        ax.set_axis_off()
+    fig.suptitle("Batch-ordered series analysis (not high-frequency time series)", y=1.02)
+    path = _save(fig, out_dir, "15_timeseries_trend.png")
+    return path
+
 
 
 # --------------------------------------------------------------------------
@@ -361,8 +577,14 @@ def plot_all(
     modeling_result: dict[str, object],
     modeling_extras: dict[str, object],
     out_dir: Path,
+    extra_analyses: dict[str, object] | None = None,
 ) -> list[Path]:
-    """生成全部图，返回写出的文件路径列表。"""
+    """生成全部图，返回写出的文件路径列表。
+
+    `extra_analyses` 传入 {"clustering": (result, extras), "regression": (result, extras),
+    "timeseries": (result, extras)} 时，额外产出聚类/回归/时序的 5 张图；
+    不传则只产出前 9 张（保持向后兼容）。
+    """
     set_style()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -387,4 +609,55 @@ def plot_all(
     )
     best = modeling_extras["best_model"]
     paths.append(plot_confusion_matrix(modeling_extras["confusion_matrices"][best], out_dir, best))
+
+    if extra_analyses:
+        cluster_part = extra_analyses.get("clustering")
+        if cluster_part:
+            c_result, c_extras = cluster_part
+            sil = c_extras.get("silhouette_table")
+            if sil is not None and len(sil):
+                paths.append(plot_cluster_selection(sil, out_dir))
+            profile = c_extras.get("profile")
+            if profile is not None and len(profile):
+                feature_cols = [c[2:] for c in profile.columns if c.startswith("z_")]
+                paths.append(plot_cluster_profiles(profile, feature_cols, out_dir))
+            composition = c_extras.get("composition")
+            if composition is not None and len(composition):
+                paths.append(plot_cluster_defect_composition(composition, out_dir))
+            pca = c_extras.get("pca")
+            if pca and c_extras.get("labels") is not None:
+                paths.append(plot_cluster_scatter(pca, c_extras["labels"], out_dir))
+
+        reg_part = extra_analyses.get("regression")
+        if reg_part:
+            r_result, r_extras = reg_part
+            if r_extras.get("pred_test"):
+                paths.append(
+                    plot_regression_predicted_vs_actual(
+                        r_extras["y_test"],
+                        r_extras["pred_test"],
+                        r_extras["baseline_test"],
+                        r_result.get("primary_target", "target"),
+                        {
+                            n: r_result["primary"]["models"][n]["test"]
+                            for n in r_result["primary"].get("models", {})
+                        },
+                        out_dir,
+                    )
+                )
+
+        ts_part = extra_analyses.get("timeseries")
+        if ts_part:
+            ts_result, _ts_extras = ts_part
+            primary = ts_result.get("series", {}).get("batch_fail_rate")
+            if primary and primary.get("n_points", 0) >= 2:
+                paths.append(
+                    plot_timeseries_trend(
+                        primary,
+                        primary.get("backtest", {}),
+                        "batch fail rate",
+                        out_dir,
+                    )
+                )
     return paths
+

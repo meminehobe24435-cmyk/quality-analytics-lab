@@ -191,8 +191,8 @@ def test_plot_roc_pr_curves(tmp_path):
     assert path.exists() and path.stat().st_size > 3000
 
 
-def test_plot_all_creates_nine_figures(tmp_path, pipeline_result):
-    """plot_all 必须产出约定的 9 张图，并且在重复调用时覆盖而不是追加。"""
+def test_plot_all_creates_all_figures_with_extra_analyses(tmp_path, pipeline_result):
+    """plot_all 必须产出全部 15 张图（含聚类/回归/时序），并在重复调用时覆盖。"""
     out = tmp_path / "figs"
     paths = plots.plot_all(
         pipeline_result["clean"],
@@ -203,10 +203,76 @@ def test_plot_all_creates_nine_figures(tmp_path, pipeline_result):
         pipeline_result["modeling"],
         pipeline_result["modeling_extras"],
         out,
+        extra_analyses={
+            "clustering": (pipeline_result["clustering"], pipeline_result["cluster_extras"]),
+            "regression": (pipeline_result["regression"], pipeline_result["regression_extras"]),
+            "timeseries": (pipeline_result["timeseries"], pipeline_result["timeseries_extras"]),
+        },
     )
-    assert len(paths) == 9
+    assert len(paths) == 15
     assert all(Path(p).exists() for p in paths)
-    assert len(list(out.glob("*.png"))) == 9
+    assert len(list(out.glob("*.png"))) == 15
     names = sorted(Path(p).name for p in paths)
-    assert names == sorted(names)
-    assert names[0].startswith("01_") and names[-1].startswith("09_")
+    assert names[0].startswith("01_") and names[-1].startswith("15_")
+    # 不带 extra_analyses 时保持向后兼容（只出前 9 张）
+    basic = plots.plot_all(
+        pipeline_result["clean"],
+        pipeline_result["ranking"],
+        pipeline_result["quality_summary"],
+        pd.DataFrame(pipeline_result["quality_report"]["missing_by_column"]),
+        pd.DataFrame(pipeline_result["quality_report"]["out_of_range"]),
+        pipeline_result["modeling"],
+        pipeline_result["modeling_extras"],
+        tmp_path / "basic",
+    )
+    assert len(basic) == 9
+
+
+def test_no_chinese_text_is_drawn_on_any_figure(tmp_path, pipeline_result, monkeypatch):
+    """图里的所有文字必须是英文 —— CI 上没有中文字体，中文会变成方块。
+
+    做法：把 `_save` 换成探针，在保存前遍历图上所有 Text 对象收集字符串，
+    再断言一个 CJK 字符都没有。这样能真正覆盖到标题/坐标轴/图例/注释。
+    """
+    import re
+
+    import matplotlib.text as mtext
+
+    collected: list[str] = []
+    original = plots._save
+
+    def spy(fig, out_dir, name):
+        for text_obj in fig.findobj(mtext.Text):
+            collected.append(text_obj.get_text())
+        return original(fig, out_dir, name)
+
+    monkeypatch.setattr(plots, "_save", spy)
+    plots.plot_all(
+        pipeline_result["clean"],
+        pipeline_result["ranking"],
+        pipeline_result["quality_summary"],
+        pd.DataFrame(pipeline_result["quality_report"]["missing_by_column"]),
+        pd.DataFrame(pipeline_result["quality_report"]["out_of_range"]),
+        pipeline_result["modeling"],
+        pipeline_result["modeling_extras"],
+        tmp_path / "figs",
+        extra_analyses={
+            "clustering": (pipeline_result["clustering"], pipeline_result["cluster_extras"]),
+            "regression": (pipeline_result["regression"], pipeline_result["regression_extras"]),
+            "timeseries": (pipeline_result["timeseries"], pipeline_result["timeseries_extras"]),
+        },
+    )
+    assert len(collected) > 50, "没有采集到图上的文字，探针可能失效了"
+    cjk = re.compile(r"[\u4e00-\u9fff]")
+    offenders = sorted({t for t in collected if cjk.search(t)})
+    assert offenders == [], f"图里出现了中文（CI 上会变成方块）: {offenders[:5]}"
+
+
+def test_trend_label_translation():
+    """时序趋势判定文案必须被翻译成英文，且未知取值原样透传。"""
+    assert plots._trend_en("无显著趋势") == "no significant trend"
+    assert plots._trend_en("显著上升趋势") == "significant upward trend"
+    assert plots._trend_en("显著下降趋势") == "significant downward trend"
+    assert plots._trend_en("无法判定") == "undetermined"
+    assert plots._trend_en("something-else") == "something-else"
+    assert plots._trend_en(None) == "None"

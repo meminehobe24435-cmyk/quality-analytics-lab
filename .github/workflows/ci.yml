@@ -59,14 +59,25 @@ jobs:
               "factor_ranking.csv",
               "model_comparison.csv",
               "significance_tests.csv",
+              "cluster_profile.csv",
               "run_meta.json",
           ]
           missing = [n for n in required if not (out / n).exists()]
           pngs = sorted(p.name for p in out.glob("*.png"))
           if missing:
               sys.exit(f"missing artifacts: {missing}")
-          if len(pngs) < 9:
-              sys.exit(f"expected >= 9 figures, got {pngs}")
+          if len(pngs) < 15:
+              sys.exit(f"expected >= 15 figures, got {pngs}")
+          expected_figures = [
+              "01_label_balance.png",
+              "09_model_comparison.png",
+              "10_cluster_selection.png",
+              "14_regression_predicted_vs_actual.png",
+              "15_timeseries_trend.png",
+          ]
+          absent = [n for n in expected_figures if n not in pngs]
+          if absent:
+              sys.exit(f"expected figures missing: {absent}")
           sizes = {p.name: p.stat().st_size for p in out.glob("*.png")}
           empty = {k: v for k, v in sizes.items() if v < 3000}
           if empty:

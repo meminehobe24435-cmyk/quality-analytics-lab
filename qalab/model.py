@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
@@ -37,6 +37,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -45,6 +46,7 @@ from . import config as cfg
 __all__ = [
     "build_preprocessor",
     "build_models",
+    "build_pipeline",
     "split_data",
     "compute_metrics",
     "select_threshold",
@@ -52,6 +54,7 @@ __all__ = [
     "run_modeling",
     "extract_feature_importance",
     "prepare_features",
+    "OversampledClassifier",
 ]
 
 SCORERS: dict[str, str] = {
@@ -108,14 +111,106 @@ def build_preprocessor(numeric: list[str], categorical: list[str]) -> ColumnTran
     )
 
 
+class _ConstantClassifier(ClassifierMixin, BaseEstimator):
+    """退化兜底：训练标签只有单一类别时，永远预测该类别。
+
+    为什么需要：`LogisticRegression` 等基学习器在单一类别上会直接抛
+    `ValueError: This solver needs samples of at least 2 classes`。
+    单类别训练集在质量数据里是真实会出现的（例如某个批次全合格），
+    这时合理的结论是"这个数据里没有可学的不合格模式"，
+    而不是让整条流程崩掉。`predict_proba` 刻意返回 (n, 2) 两列，
+    与其它模型保持一致的接口（sklearn 的 DummyClassifier 在单类别时只返回 1 列）。
+    """
+
+    def fit(self, X, y):
+        self.classes_ = np.unique(np.asarray(y))
+        self.constant_ = self.classes_[0]
+        return self
+
+    def predict(self, X):
+        return np.full(len(X), self.constant_)
+
+    def predict_proba(self, X):
+        proba = np.zeros((len(X), 2), dtype=float)
+        col = 1 if self.constant_ == 1 else 0
+        proba[:, col] = 1.0
+        return proba
+
+
+class OversampledClassifier(ClassifierMixin, BaseEstimator):
+    """给「不支持 class_weight 的分类器」补上类别不平衡处理：训练时随机过采样少数类。
+
+    ⚠️ 继承顺序必须是 (ClassifierMixin, BaseEstimator)：scikit-learn 的 `BaseEstimator`
+    自己实现了 `__sklearn_tags__` 且不会向上调用，如果把 BaseEstimator 写在前面，
+    `ClassifierMixin` 的 `__sklearn_tags__` 永远不会执行，`is_classifier()` 就是 False ——
+    实测后果是交叉验证里 `roc_auc` 拿到 (n, 2) 的概率矩阵直接报错。
+    （sklearn 官方约定就是 "mixin 放左边"，这里踩了一次。）
+
+    为什么需要它：`MLPClassifier` 在 scikit-learn 里**没有** `class_weight` 参数
+    （实测会直接抛 `TypeError`），而项目里另外三个模型都用了 class_weight。
+    为了让神经网络与它们在同一套不平衡处理原则下对比，这里用随机过采样
+    （少数类有放回抽样到与多数类同量）。
+
+    为什么不用 sklearn 的 Pipeline 加一个采样器 step：sklearn 的 Pipeline 会把
+    **原始的 y** 传给最后一步，采样器改变行数后 y 就对不上了（这也是 imbalanced-learn
+    需要自己一套 Pipeline 的原因）。所以这里把"采样 + 训练"包成一个估计器，
+    它自身仍符合 sklearn 的 fit/predict 接口，可以正常参与交叉验证。
+
+    关键性质（有测试）：过采样只发生在 `fit` 内部（即只在训练折上），
+    `predict_proba` 不做任何采样，因此验证集/测试集不会被污染。
+    """
+
+    def __init__(self, base: ClassifierMixin | None = None, random_state: int = 0):
+        self.base = base
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        X_arr = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+        y_arr = np.asarray(y)
+        self.classes_, counts = np.unique(y_arr, return_counts=True)
+        self.n_train_original_ = int(len(y_arr))
+        if len(self.classes_) < 2:
+            # 单一类别：过采样无意义，且多数基学习器无法在单类别上拟合，
+            # 因此退化为常数预测器（并记录，便于报告里说明）。
+            self.n_train_resampled_ = int(len(y_arr))
+            self.n_oversampled_added_ = 0
+            self.single_class_ = True
+            self.base_ = _ConstantClassifier().fit(X_arr, y_arr)
+            return self
+        self.single_class_ = False
+
+        target = int(counts.max())
+        rng = np.random.default_rng(self.random_state)
+        picked = [np.arange(len(y_arr))]
+        for cls, count in zip(self.classes_, counts):
+            if count < target:
+                pool = np.flatnonzero(y_arr == cls)
+                picked.append(rng.choice(pool, size=target - count, replace=True))
+        idx = np.concatenate(picked)
+        idx.sort(kind="stable")  # 排序让结果与输入顺序无关但确定
+        self.n_train_resampled_ = int(len(idx))
+        self.n_oversampled_added_ = int(len(idx) - len(y_arr))
+        self.base_ = clone(self.base).fit(X_arr[idx], y_arr[idx])
+        return self
+
+    def predict(self, X):
+        return self.base_.predict(X)
+
+    def predict_proba(self, X):
+        return self.base_.predict_proba(X)
+
+
 def build_models(seed: int = cfg.SEED) -> dict[str, Pipeline]:
-    """三个对比模型（此时只含分类器，预处理由 `build_pipeline` 拼上）。
+    """四个对比模型（此时只含分类器，预处理由 `build_pipeline` 拼上）。
 
     逻辑回归：线性基准，系数可解释，便于向工艺/质量同事解释方向与量级；
     随机森林：非线性 + 交互，对异常值稳健；
-    梯度提升（HistGB）：表格数据上通常精度最高，但可解释性最弱。
+    梯度提升（HistGB）：表格数据上通常精度最高，但可解释性最弱；
+    神经网络（MLPClassifier）：JD 里点名的算法族，作为"深度学习基线"参与对比 ——
+        用 lbfgs 求解器（小样本上收敛稳定、确定性好），需要标准化输入，
+        因此必须放在 Pipeline 里（本项目已经这么做了）。
 
-    三者都显式处理类别不平衡（class_weight），且 n_jobs=1 保证可复现。
+    四者都显式处理类别不平衡（class_weight），且 n_jobs=1 保证可复现。
     """
     return {
         "logistic_regression": Pipeline(
@@ -154,6 +249,24 @@ def build_models(seed: int = cfg.SEED) -> dict[str, Pipeline]:
                         class_weight="balanced",
                         random_state=seed,
                         early_stopping=False,
+                    ),
+                )
+            ]
+        ),
+        "mlp_classifier": Pipeline(
+            [
+                (
+                    "clf",
+                    OversampledClassifier(
+                        base=MLPClassifier(
+                            hidden_layer_sizes=(32, 16),
+                            activation="relu",
+                            solver="lbfgs",
+                            alpha=1e-3,
+                            max_iter=800,
+                            random_state=seed,
+                        ),
+                        random_state=seed,
                     ),
                 )
             ]

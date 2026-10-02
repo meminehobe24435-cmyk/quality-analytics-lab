@@ -361,18 +361,208 @@ def build_report_markdown(
             f"{abl['note']}\n"
         )
 
-    # 6. 图
-    parts.append("\n## 6. 图表\n")
+    # 6. 算法覆盖：分类之外的四类算法
+    clustering = metrics.get("clustering", {})
+    regression = metrics.get("regression", {})
+    timeseries = metrics.get("timeseries", {})
+
+    parts.append("\n## 6. 聚类：把「不合格」拆成几种失效模式\n")
+    parts.append(
+        f"**用途**：{clustering.get('purpose', '')}\n\n"
+        f"在不合格样本（n={clustering.get('n_samples')}）上对 "
+        f"{len(clustering.get('feature_space', []))} 个工艺/原料特征做 KMeans，"
+        f"k 在 {clustering.get('k_candidates')} 中按**轮廓系数**选，"
+        f"选中 **k={clustering.get('k_selected')}**（轮廓系数 "
+        f"{_fmt(clustering.get('silhouette'))}）。\n"
+    )
+    parts.append("\n**各 k 的轮廓系数**\n")
+    parts.append(
+        _table(
+            ["k", "轮廓系数", "inertia"],
+            [
+                [k, _fmt(v), _fmt(clustering.get("inertia_by_k", {}).get(k), 2)]
+                for k, v in (clustering.get("silhouette_by_k") or {}).items()
+            ],
+        )
+    )
+    profile = clustering.get("profile") or []
+    if profile:
+        parts.append("\n**簇画像（相对总体均值的偏离，z 值）**\n")
+        rows = []
+        for entry in profile:
+            top = [
+                (k[2:], v)
+                for k, v in entry.items()
+                if k.startswith("z_") and isinstance(v, (int, float))
+            ]
+            top.sort(key=lambda t: -abs(t[1]))
+            rows.append(
+                [
+                    entry.get("cluster"),
+                    entry.get("n"),
+                    _fmt(entry.get("share")),
+                    _fmt(entry.get("fail_rate_in_cluster")),
+                    "、".join(f"{name} {v:+.2f}" for name, v in top[:3]),
+                    f"{entry.get('top_defect_type')} ({_fmt(entry.get('top_defect_share'))})",
+                ]
+            )
+        parts.append(
+            _table(
+                ["簇", "单元数", "占比", "簇内不合格率", "最偏离的特征(top3, z)", "主要缺陷类型(占比)"],
+                rows,
+            )
+        )
+    if clustering.get("note"):
+        parts.append(f"\n{clustering['note']}\n")
+
+    parts.append("\n## 7. 回归：预测连续的性能指标\n")
+    primary = regression.get("primary", {})
+    parts.append(
+        f"**用途**：{regression.get('purpose', '')}\n\n"
+        f"主目标：`{regression.get('primary_target')}`；"
+        f"有效样本 {primary.get('n_rows_used')} 条"
+        f"（目标缺失的行直接丢弃，不填补 —— 填补目标等于伪造标签）；"
+        f"切分 train/test = {primary.get('split', {}).get('train')} / "
+        f"{primary.get('split', {}).get('test')}。\n"
+    )
+    if primary.get("models"):
+        rows = []
+        base = primary["baseline_mean"]["test"]
+        rows.append(["**均值基线（什么都不学）**", "—", _fmt(base["mae"]), _fmt(base["rmse"]), _fmt(base["r2"])])
+        for name, entry in primary["models"].items():
+            rows.append(
+                [
+                    name,
+                    _fmt(entry.get("mae_reduction_vs_baseline_pct"), 2) + "%",
+                    _fmt(entry["test"]["mae"]),
+                    _fmt(entry["test"]["rmse"]),
+                    _fmt(entry["test"]["r2"]),
+                ]
+            )
+        parts.append(
+            _table(["模型", "MAE 相对基线降低", "测试 MAE", "测试 RMSE", "测试 R²"], rows)
+        )
+        parts.append(
+            f"\n**结论**：{regression.get('note', '')}。"
+            + (
+                "模型**确实优于均值基线**，说明工艺参数对性能指标有可利用的预测力。"
+                if regression.get("beats_baseline")
+                else "模型**没有超过均值基线** —— 这种情况下回归模型不应被采用。"
+            )
+            + "\n"
+        )
+    if regression.get("all_targets"):
+        parts.append("\n**其它目标（最优模型按测试 MAE 选）**\n")
+        parts.append(
+            _table(
+                ["目标", "有效样本", "基线 MAE", "最优模型", "MAE", "RMSE", "R²"],
+                [
+                    [
+                        e["target"],
+                        e["n_rows_used"],
+                        _fmt(e["baseline_mae"], 4),
+                        e["best_model"] or "n/a",
+                        _fmt(e["best_mae"], 4),
+                        _fmt(e["best_rmse"], 4),
+                        _fmt(e["best_r2"], 4),
+                    ]
+                    for e in regression["all_targets"]
+                ],
+            )
+        )
+
+    parts.append("\n## 8. 神经网络（MLPClassifier）与树模型的对比\n")
+    mlp = modeling["models"].get("mlp_classifier")
+    if mlp:
+        tm = mlp["test_metrics"]
+        parts.append(
+            f"`MLPClassifier`（hidden=(32,16)、lbfgs 求解器、`class_weight='balanced'`、"
+            f"输入经标准化）与树模型在同一套切分与阈值规则下对比：\n\n"
+            f"- 测试集 AP = {_fmt(tm['average_precision'])}、"
+            f"ROC-AUC = {_fmt(tm['roc_auc'])}、F1 = {_fmt(tm['f1'])}\n"
+            f"- 5 折 CV AP = {_fmt(modeling['cv']['mlp_classifier']['average_precision']['mean'])}"
+            f" ± {_fmt(modeling['cv']['mlp_classifier']['average_precision']['std'])}\n"
+            f"- 阈值（验证集选定）= {_fmt(mlp['threshold_selection']['threshold'], 3)}\n"
+            f"- 混淆矩阵 = {tm['confusion_matrix']}\n"
+        )
+        best_name = modeling["best_model_by_validation_ap"]
+        best_ap = modeling["models"][best_name]["test_metrics"]["average_precision"]
+        diff = tm["average_precision"] - best_ap
+        parts.append(
+            f"\n**如实结论**：在 {len(modeling['models'])} 个模型里，"
+            f"神经网络{('不如' if diff < 0 else '不差于')}最优的 `{best_name}`"
+            f"（AP {_fmt(tm['average_precision'])} vs {_fmt(best_ap)}，差 {diff:+.4f}）。"
+            "本数据是约 5000 行、11 个特征的**表格数据**，特征与标签的关系以单调/近似线性为主，"
+            "因此树模型与线性模型已经足够，神经网络没有体现出优势，"
+            "而且它的可解释性与调参成本都更差 —— 这也是本项目不把它作为主模型的原因。\n"
+        )
+
+    parts.append("\n## 9. 时间序列 / 趋势分析（按批次顺序的序列，不是高频时序）\n")
+    parts.append(f"{timeseries.get('scope_note', '')}\n")
+    series = timeseries.get("series", {})
+    if series:
+        rows = []
+        for name, s in series.items():
+            mk = s.get("mann_kendall", {})
+            lt = s.get("linear_trend", {})
+            ac = s.get("autocorrelation_lag1", {})
+            rows.append(
+                [
+                    name,
+                    s.get("n_points"),
+                    _fmt_p(mk.get("p_value")),
+                    mk.get("trend", "n/a"),
+                    _fmt(mk.get("sen_slope"), 6),
+                    _fmt_p(lt.get("p_value")),
+                    _fmt(ac.get("r1"), 4),
+                    "是" if ac.get("significant") else "否",
+                ]
+            )
+        parts.append(
+            _table(
+                ["序列", "点数", "MK p", "MK 趋势判定", "Sen's 斜率", "线性趋势 p", "滞后1 自相关", "自相关显著"],
+                rows,
+            )
+        )
+    fc = timeseries.get("next_batch_forecast") or {}
+    if fc:
+        parts.append("\n**下一个批次的一步预测**\n")
+        parts.append(
+            _table(
+                ["预测方法", "预测值"],
+                [
+                    ["指数平滑 (SES)", _fmt(fc.get("exponential_smoothing"), 4)],
+                    ["AR(1)", _fmt(fc.get("ar1"), 4)],
+                    ["历史均值", _fmt(fc.get("historical_mean"), 4)],
+                    ["上一个观测值", _fmt(fc.get("last_observed"), 4)],
+                ],
+            )
+        )
+    errs = timeseries.get("forecast_one_step_error") or {}
+    if errs:
+        parts.append("\n**一步预测回测误差（扩张窗口，每个点只用它之前的数据）**\n")
+        parts.append(
+            _table(
+                ["预测器", "MAE", "RMSE"],
+                [[k, _fmt(v.get("mae"), 4), _fmt(v.get("rmse"), 4)] for k, v in errs.items()],
+            )
+        )
+    parts.append(f"\n**结论**：{timeseries.get('conclusion', '')}\n")
+
+    # 10. 图
+    parts.append("\n## 10. 图表\n")
     for p in plots:
         parts.append(f"- `{Path(p).name}`")
     parts.append(
-        "\n图表说明：图 1 类别不平衡；图 2 数值因子按标签的分布；图 3 按标签分组的箱线图；"
-        "图 4 Spearman 相关性热图；图 5 因子重要性（按 BH 显著性着色）；"
-        "图 6 主模型混淆矩阵；图 7 ROC 与 PR 曲线；图 8 数据质量总览；图 9 模型对比。\n"
+        "\n图表说明：01 类别不平衡；02 数值因子按标签的分布；03 按标签分组的箱线图；"
+        "04 Spearman 相关性热图；05 因子重要性（按 BH 显著性着色）；06 主模型混淆矩阵；"
+        "07 ROC 与 PR 曲线；08 数据质量总览；09 模型对比（含神经网络）；"
+        "10 聚类 k 的选择；11 失效模式簇画像；12 簇内缺陷类型构成；13 簇的 PCA 投影；"
+        "14 回归预测值 vs 真值；15 批次序列趋势与一步预测误差。\n"
     )
 
-    # 7. 复现
-    parts.append("\n## 7. 可复现性与边界\n")
+    # 11. 复现
+    parts.append("\n## 11. 可复现性与边界\n")
     parts.append(
         f"- 随机种子：`{metrics['run']['seed']}`（数据生成、切分、交叉验证、模型初始化统一使用）\n"
         f"- 数据指纹（清洗后宽表 sha256）：`{metrics['data']['clean_fingerprint']}`\n"
