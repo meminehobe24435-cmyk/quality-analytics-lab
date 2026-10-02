@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 运行产物（reports/ 中的 metrics.json 与 PNG 是可复算产物，默认不入库；
+# 需要随仓库查看结果时执行 `py -3.12 -m qalab run --out reports`）
+reports/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

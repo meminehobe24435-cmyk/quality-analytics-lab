@@ -1,0 +1,10 @@
+# 运行期依赖（真实使用，非装饰）
+pandas>=3.0,<4
+numpy>=2.0,<3
+matplotlib>=3.10,<4
+seaborn>=0.13,<1
+scikit-learn>=1.7,<2
+scipy>=1.14,<2
+
+# 测试
+pytest>=8.0
