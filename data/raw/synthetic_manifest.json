@@ -1,0 +1,53 @@
+{
+  "out_of_range_furnace_temp": {
+    "runs": [
+      "R007",
+      "R023",
+      "R041"
+    ],
+    "value": 9999.0,
+    "n": 3
+  },
+  "missing_inspector_id": 5,
+  "missing_machine_id": 3,
+  "duplicate_inspection_rows": 2,
+  "out_of_spec_perf_readings": {
+    "column": "tensile_strength_mpa",
+    "n": 6,
+    "below": 300.0
+  },
+  "constant_column": "plant_code",
+  "near_constant_column": {
+    "name": "is_archived",
+    "n_true": 20,
+    "share": 0.004015257980325236
+  },
+  "extra_perf_test_unit": [
+    "U00001"
+  ],
+  "ground_truth_mechanism": {
+    "primary_factors": [
+      "furnace_temp_c",
+      "material_moisture_pct",
+      "pressure_mpa"
+    ],
+    "primary_note": "系数最大，5 个种子上均能被识别（见 tests/test_significance.py）",
+    "secondary_factors": [
+      "machine_id",
+      "line_speed_mpm",
+      "cooling_rate_cps",
+      "shift"
+    ],
+    "secondary_note": "机台 M3 为设计的问题机台（较大效应，可检出）；线速/冷却/班次为弱效应，在 144 个炉次的样本量下不一定检出 —— 这是真实的统计功效限制，不做人为调参掩盖",
+    "indirect_factors": [
+      "material_supplier"
+    ],
+    "indirect_note": "供应商通过原料含水率间接影响风险，单因子筛选中通常不单独显著",
+    "decoy_factors": [
+      "ambient_humidity_pct",
+      "operator_id",
+      "material_particle_size_um"
+    ],
+    "decoy_note": "真值为零效应，用于检验假阳性控制（BH 校正后不应被稳定判为显著）"
+  }
+}
