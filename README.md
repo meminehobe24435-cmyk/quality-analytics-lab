@@ -4,7 +4,7 @@
 
 <p align="left">
   <img alt="python" src="https://img.shields.io/badge/python-3.12-blue">
-  <img alt="tests" src="https://img.shields.io/badge/tests-195-brightgreen">
+  <img alt="tests" src="https://img.shields.io/badge/tests-197-brightgreen">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -52,7 +52,7 @@ py -3.12 -m qalab run --regenerate-data --out reports         # 重新生成合�
 py -3.12 -m qalab run --no-plots --n-perm 200                 # 快速冒烟
 py -3.12 -m qalab stability --seeds 5 --out reports           # 跨种子稳定性检查
 
-# 5) 测试（195 项）
+# 5) 测试（197 项）
 py -3.12 -m pytest -q
 
 # 6) 可复现性验证：连跑两次逐字节比对全部产物
@@ -204,7 +204,8 @@ py -3.12 tools/check_reproducibility.py --n-perm 1000
 | 可视化 | `qalab/plots.py` | 9 张图（分布、箱线、相关热图、因子重要性、混淆矩阵、ROC/PR、质量总览、模型对比、类别平衡） |
 | 报告 | `qalab/report.py` | `metrics.json`、Markdown 实验报告（数字全部来自指标字典）、CSV 明细、`run_meta.json` |
 | 流程 | `qalab/pipeline.py` | 端到端编排与逐步日志 |
-| CLI | `qalab/cli.py` | `run` / `stability` / `info`，UTF-8 控制台输出 |
+| 控制台 | `qalab/console.py` | Windows 控制台 UTF-8 输出（中文不乱码、不抛编码异常） |
+| CLI | `qalab/cli.py` | `run` / `stability` / `info` |
 
 ---
 
@@ -237,7 +238,7 @@ py -3.12 tools/check_reproducibility.py --n-perm 1000
    最初的筛选只在单元级做 Mann-Whitney / 卡方，把 4981 个单元当独立观测，`pressure_mpa` 拿到 p=4.08e-75；同一个因子做簇置换后 p=1.00e-03。**修法**：引入三层级口径，并按"因子自身变化的层级"检验（生产参数按炉次、原料因子按批次）。相应地也调整了数据规模：批次数从 12 调到 36、炉次数从 60 调到 144 —— 因为用 12 个批次检验批次级因子时，真值零效应的粒径因子在 3/5 个种子上被误判为显著。
 
 9. **CI 在 Ubuntu 上全绿、在 Windows 上变红：`UnicodeEncodeError: 'charmap'`。**
-   Windows runner 的控制台默认不是 UTF-8，CI 里那句 `print("artifacts OK:", required)` 打印的文件名列表含 `实验报告.md`，直接抛编码异常、把整个 job 判失败 —— **而真正的断言逻辑其实全部通过了**（文件都在、9 张图都在）。**修法**：在 CI 的内联脚本里显式 `sys.stdout.reconfigure(encoding="utf-8")`；项目自身的 CLI（`qalab/cli.py`）早就有同样的处理（`_force_utf8_stdout`），这次算是把"同一个坑在 CI 脚本里又踩了一遍"。
+   Windows runner 的控制台默认不是 UTF-8，CI 里那句 `print("artifacts OK:", required)` 打印的文件名列表含 `实验报告.md`，直接抛编码异常、把整个 job 判失败 —— **而真正的断言逻辑其实全部通过了**（文件都在、9 张图都在）。修好这一处之后 CI 又红了一次，这次是 `tools/check_reproducibility.py` 打印"一致/不一致"表格时踩了同一个坑。**修法**：把处理收敛成一个公共函数 `qalab/console.py::force_utf8_stdout()`，CLI、两个 tools 脚本、CI 内联脚本一律在开头调用；并加了单元测试（重复调用安全、对没有 `reconfigure` 的流静默跳过）。同一个坑在三个地方踩过，最终靠"只留一处实现"收口。
 
 ---
 
@@ -253,7 +254,7 @@ py -3.12 tools/check_reproducibility.py --n-perm 1000
 6. **统计功效的硬限制。** 批次级因子只有 36 个独立观测，原料含水率在 5 个种子里只有 3 次显著；被设计为弱效应的 `cooling_rate_cps`、`shift` 在因子层级口径下 0/5 显著。这不是 bug，而是样本量与效应量的客观限制，项目没有通过调参把它"修好"。
 7. **`machine_id` 的缺失值被填补成 `UNKNOWN` 后会成为一个高估的哑变量。** 3 条机台缺失记录恰好不合格率很低，模型学出了一个很大的负系数，这属于小样本稀有类别的过拟合表现，报告里保留了但没有专门处理（例如没做目标编码或合并稀有类别）。
 8. **性能测试特征只做了对照实验，没有进入正式模型。** 并且对照实验显示它们没有带来提升（AP 0.6338 → 0.5642），这与"多项性能指标应该很有用"的直觉相反，可能与 30% 未抽检 + 测量噪声有关，项目里没有进一步深挖。
-9. **单元测试虽然多（195 项），但都是在合成数据上跑的。** 真实脏数据里那些奇形怪状的问题（编码混乱、时区错乱、单位混用、主数据不一致）没有被覆盖。
+9. **单元测试虽然多（197 项），但都是在合成数据上跑的。** 真实脏数据里那些奇形怪状的问题（编码混乱、时区错乱、单位混用、主数据不一致）没有被覆盖。
 
 ---
 
@@ -274,8 +275,9 @@ quality-analytics-lab/
 │   ├── plots.py              # 9 张 seaborn/matplotlib 图
 │   ├── report.py             # metrics.json / Markdown 报告 / CSV / run_meta
 │   ├── pipeline.py           # 端到端编排
-│   └── cli.py                # 命令行入口
-├── tests/                    # 195 项 pytest 测试
+│   ├── console.py            # Windows 控制台 UTF-8 输出（踩过三次的坑）
+│   └── cli.py                # 命令行入口（run / stability / info）
+├── tests/                    # 197 项 pytest 测试
 │   ├── conftest.py           # session 级 fixture（只跑一次完整流程）
 │   ├── test_synth.py         (16)  数据生成与注入异常
 │   ├── test_io.py            (18)  合并/聚合/清洗/指纹
@@ -285,7 +287,7 @@ quality-analytics-lab/
 │   ├── test_model.py         (29)  指标退化输入、切分、阈值、重要性、泄漏
 │   ├── test_report.py        (13)  报告与产物
 │   ├── test_cli.py           (22)  CLI 与端到端流程、可复现性
-│   └── test_config_and_plots.py (18) 配置自洽性 + 出图
+│   └── test_config_and_plots.py (20) 配置自洽性 + 控制台编码 + 出图
 ├── tools/
 │   ├── calibrate.py          # 开发期校准：跨种子检查信号能否被识别
 │   └── check_reproducibility.py  # 连跑两次逐字节比对（CI 每次执行）
@@ -304,7 +306,7 @@ quality-analytics-lab/
 
 ## 测试与 CI
 
-195 项 pytest 测试，覆盖：数据生成的注入异常计数、一对多聚合与行数守恒、清洗各项动作的语义、数据质量检查的每个边界（全缺失列、越界、重复行、常量列、单一类别、无方差、空表）、BH 校正（与定义式暴力交叉验证、单调性、NaN/空输入）、簇置换检验的**第一类错误率**（零假设下 40 次重复拒绝率不超过名义水平）、指标计算的退化输入（全 0 / 全 1 / 无非正例预测）、阈值选择、分层切分与索引互斥、信息泄漏剔除、报告的每个章节、CLI 入口与端到端产物。
+197 项 pytest 测试，覆盖：数据生成的注入异常计数、一对多聚合与行数守恒、清洗各项动作的语义、数据质量检查的每个边界（全缺失列、越界、重复行、常量列、单一类别、无方差、空表）、BH 校正（与定义式暴力交叉验证、单调性、NaN/空输入）、簇置换检验的**第一类错误率**（零假设下 40 次重复拒绝率不超过名义水平）、指标计算的退化输入（全 0 / 全 1 / 无非正例预测）、阈值选择、分层切分与索引互斥、信息泄漏剔除、报告的每个章节、CLI 入口与端到端产物。
 
 其中按要求包含**注入已知信号并断言被识别**的测试：
 - `test_injected_signal_is_identified`：手工构造"只有一个因子有效应、两个诱饵无效应"的数据集，断言有效应因子显著且排第一、两个诱饵都不显著；

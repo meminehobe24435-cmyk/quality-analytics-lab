@@ -17,7 +17,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from qalab.console import force_utf8_stdout  # noqa: E402
 from qalab.pipeline import run_pipeline  # noqa: E402
+
+# Windows 控制台不是 UTF-8，下面要打印中文表头与「一致/不一致」，必须先重配
+force_utf8_stdout()
 
 TRACKED = [
     "metrics.json",

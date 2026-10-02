@@ -10,6 +10,9 @@ from scipy import stats
 
 from qalab import config as cfg
 from qalab import io, significance, synth
+from qalab.console import force_utf8_stdout
+
+force_utf8_stdout()
 
 PRIMARY = ["furnace_temp_c", "material_moisture_pct", "pressure_mpa"]
 SECONDARY = ["line_speed_mpm", "cooling_rate_cps", "machine_id", "shift", "material_supplier"]

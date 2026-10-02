@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ import pandas as pd
 import pytest
 
 from qalab import config as cfg
-from qalab import plots
+from qalab import console, plots
 
 
 # --------------------------------------------------------------------------
@@ -97,6 +98,29 @@ def test_injected_anomaly_constants_are_positive():
     assert cfg.N_INJECTED_OOS_PERF > 0
     assert 0 < cfg.NEAR_CONSTANT_TRUE_RATE < 0.05
     assert cfg.CONSTANT_COLUMN_NAME not in cfg.MODEL_FEATURES
+
+
+# --------------------------------------------------------------------------
+# 控制台编码（Windows 上踩过三次的坑）
+# --------------------------------------------------------------------------
+def test_force_utf8_stdout_is_safe_to_call(capsys):
+    """重复调用不应抛异常，且之后仍能正常打印中文。"""
+    console.force_utf8_stdout()
+    console.force_utf8_stdout()
+    print("中文输出测试 实验报告.md")
+    out = capsys.readouterr().out
+    assert "实验报告.md" in out
+
+
+def test_force_utf8_stdout_tolerates_streams_without_reconfigure(monkeypatch):
+    """对没有 reconfigure 的流（被替换过的 stdout）必须静默跳过而不是崩溃。"""
+
+    class Dummy:
+        def write(self, _text):  # pragma: no cover - 仅占位
+            pass
+
+    monkeypatch.setattr(sys, "stdout", Dummy())
+    console.force_utf8_stdout()  # 不应抛异常
 
 
 # --------------------------------------------------------------------------

@@ -18,14 +18,12 @@ import sys
 from pathlib import Path
 
 from . import config as cfg
+from .console import force_utf8_stdout
 
 
 def _force_utf8_stdout() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):  # pragma: no cover - 非标准流
-            pass
+    """兼容旧调用点（真正的实现已收敛到 qalab.console）。"""
+    force_utf8_stdout()
 
 
 def build_parser() -> argparse.ArgumentParser:
