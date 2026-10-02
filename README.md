@@ -236,6 +236,9 @@ py -3.12 tools/check_reproducibility.py --n-perm 1000
 8. **簇内相关（伪重复）让朴素检验系统性地说谎。**
    最初的筛选只在单元级做 Mann-Whitney / 卡方，把 4981 个单元当独立观测，`pressure_mpa` 拿到 p=4.08e-75；同一个因子做簇置换后 p=1.00e-03。**修法**：引入三层级口径，并按"因子自身变化的层级"检验（生产参数按炉次、原料因子按批次）。相应地也调整了数据规模：批次数从 12 调到 36、炉次数从 60 调到 144 —— 因为用 12 个批次检验批次级因子时，真值零效应的粒径因子在 3/5 个种子上被误判为显著。
 
+9. **CI 在 Ubuntu 上全绿、在 Windows 上变红：`UnicodeEncodeError: 'charmap'`。**
+   Windows runner 的控制台默认不是 UTF-8，CI 里那句 `print("artifacts OK:", required)` 打印的文件名列表含 `实验报告.md`，直接抛编码异常、把整个 job 判失败 —— **而真正的断言逻辑其实全部通过了**（文件都在、9 张图都在）。**修法**：在 CI 的内联脚本里显式 `sys.stdout.reconfigure(encoding="utf-8")`；项目自身的 CLI（`qalab/cli.py`）早就有同样的处理（`_force_utf8_stdout`），这次算是把"同一个坑在 CI 脚本里又踩了一遍"。
+
 ---
 
 ## 边界与已知限制

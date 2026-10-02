@@ -43,10 +43,23 @@ jobs:
         shell: python
         run: |
           import pathlib, sys
+
+          # Windows runner 的控制台默认不是 UTF-8（charmap），
+          # 直接 print 中文文件名（实验报告.md）会抛 UnicodeEncodeError 而让 CI 变红。
+          for stream in (sys.stdout, sys.stderr):
+              try:
+                  stream.reconfigure(encoding="utf-8", errors="replace")
+              except (AttributeError, ValueError):
+                  pass
+
           out = pathlib.Path("reports")
           required = [
-              "metrics.json", "实验报告.md", "factor_ranking.csv",
-              "model_comparison.csv", "significance_tests.csv", "run_meta.json",
+              "metrics.json",
+              "\u5b9e\u9a8c\u62a5\u544a.md",
+              "factor_ranking.csv",
+              "model_comparison.csv",
+              "significance_tests.csv",
+              "run_meta.json",
           ]
           missing = [n for n in required if not (out / n).exists()]
           pngs = sorted(p.name for p in out.glob("*.png"))
